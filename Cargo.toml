@@ -1,0 +1,26 @@
+[package]
+name = "nudge"
+version = "0.1.0"
+authors = ["FaultyRAM <explodingpsu@gmail.com>"]
+description = "Utilities for updating filesystem timestamps, a la touch on Unix."
+repository = "https://github.com/FaultyRAM/nudge-rs"
+readme = "README.md"
+keywords = ["touch", "timestamp", "date", "time", "filesystem"]
+categories = ["filesystem"]
+license = "(Apache-2.0 OR MIT)"
+
+[badges.travis-ci]
+repository = "FaultyRAM/nudge-rs"
+
+[badges.appveyor]
+repository = "FaultyRAM/nudge-rs"
+
+[badges.is-it-maintained-issue-resolution]
+repository = "FaultyRAM/nudge-rs"
+
+[badges.is-it-maintained-open-issues]
+repository = "FaultyRAM/nudge-rs"
+
+[dependencies.clippy]
+version = "0.0"
+optional = true
