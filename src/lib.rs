@@ -10,8 +10,7 @@
 #![cfg_attr(feature = "clippy", plugin(clippy))]
 #![cfg_attr(feature = "clippy", forbid(clippy))]
 #![cfg_attr(feature = "clippy", forbid(clippy_internal))]
-#![cfg_attr(feature = "clippy", forbid(clippy_pedantic))]
-#![cfg_attr(feature = "clippy", forbid(clippy_restrictions))]
+#![cfg_attr(feature = "clippy", deny(clippy_pedantic))]
 #![forbid(warnings)]
 #![forbid(anonymous_parameters)]
 #![forbid(box_pointers)]
@@ -19,15 +18,21 @@
 #![forbid(missing_docs)]
 #![forbid(trivial_casts)]
 #![forbid(trivial_numeric_casts)]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![forbid(unused_extern_crates)]
 #![forbid(unused_import_braces)]
 #![deny(unused_qualifications)]
 #![forbid(unused_results)]
 #![forbid(variant_size_differences)]
 
+#[cfg(windows)]
+extern crate kernel32;
+#[cfg(windows)]
+extern crate winapi;
+
 pub mod creation_method;
 pub mod item;
+pub mod resolution_method;
 mod sys;
 
 /// Re-exports of commonly-used functionality.
@@ -35,10 +40,13 @@ pub mod prelude {
     pub use Builder;
     pub use creation_method::{CreationMethod, NoCreate, NonRecursive, Recursive};
     pub use item::{Directory, File, Item};
+    pub use resolution_method::{FollowSymlinks, ResolutionMethod, UpdateSymlinks};
 }
 
 use self::creation_method::CreationMethod;
+use self::resolution_method::ResolutionMethod;
 use std::io;
+use std::marker::PhantomData;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -55,34 +63,34 @@ pub struct Builder {
     modified: Option<SystemTime>,
 }
 
-/// Updates the timestamps for a filesystem path to the current system time, after resolving
-/// symbolic links.
-///
-/// If the path does not exist, the specified creation method will be used to create the path.
-///
-/// This wraps the functionality provided by the `Builder` type and is provided for convenience.
-/// For more fine-grained control, use `Builder` directly.
-pub fn touch<M: CreationMethod, P: AsRef<Path>>(path: P) -> io::Result<()> {
-    let now = SystemTime::now();
-    Builder::new()
-        .accessed(now)
-        .modified(now)
-        .touch::<M, P>(path)
+#[doc(hidden)]
+/// Options for controlling behaviour while updating timestamps.
+pub struct TouchOptions<A: CreationMethod, B: ResolutionMethod>(PhantomData<A>, PhantomData<B>);
+
+#[doc(hidden)]
+/// Provides an overloadable `touch` method for `TouchOptions`.
+pub trait Touch {
+    fn touch<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()>;
 }
 
-/// Updates the timestamps for a filesystem path to the current system time, without resolving
-/// symbolic links.
+/// Updates the timestamps for a filesystem path to the current system time.
 ///
 /// If the path does not exist, the specified creation method will be used to create the path.
 ///
+/// If symbolic links are encountered, the specified resolution method will be used to determine
+/// how to resolve the path or, alternatively, whether to update the symbolic link itself.
+///
 /// This wraps the functionality provided by the `Builder` type and is provided for convenience.
 /// For more fine-grained control, use `Builder` directly.
-pub fn touch_symlink<M: CreationMethod, P: AsRef<Path>>(path: P) -> io::Result<()> {
+pub fn touch<A: CreationMethod, B: ResolutionMethod, C: AsRef<Path>>(path: C) -> io::Result<()>
+where
+    TouchOptions<A, B>: Touch,
+{
     let now = SystemTime::now();
     Builder::new()
         .accessed(now)
         .modified(now)
-        .touch_symlink::<M, P>(path)
+        .touch::<A, B, C>(path)
 }
 
 impl Builder {
@@ -110,28 +118,17 @@ impl Builder {
         self
     }
 
-    /// Updates the timestamps for a filesystem path, after resolving symbolic links.
+    /// Updates the timestamps for a filesystem path.
     ///
     /// If the path does not exist, the specified creation method will be used to create the path.
-    pub fn touch<M: CreationMethod, P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
-        sys::touch_existing(self, &path).or_else(|e| if e.kind() == io::ErrorKind::NotFound {
-            M::touch_new::<P>(self, path)
-        } else {
-            Err(e)
-        })
-    }
-
-    /// Updates the timestamps for a filesystem path, without resolving symbolic links.
-    ///
-    /// If the path does not exist, the specified creation method will be used to create the path.
-    pub fn touch_symlink<M: CreationMethod, P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
-        sys::touch_existing_symlink(self, &path).or_else(
-            |e| if e.kind() == io::ErrorKind::NotFound {
-                M::touch_new::<P>(self, path)
-            } else {
-                Err(e)
-            },
-        )
+    pub fn touch<A: CreationMethod, B: ResolutionMethod, C: AsRef<Path>>(
+        &self,
+        path: C,
+    ) -> io::Result<()>
+    where
+        TouchOptions<A, B>: Touch,
+    {
+        TouchOptions::<A, B>::touch::<C>(self, path)
     }
 }
 
