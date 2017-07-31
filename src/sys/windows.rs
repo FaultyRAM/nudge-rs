@@ -15,10 +15,9 @@ use creation_method::{NoCreate, NonRecursive, Recursive};
 use item::{Directory, File, Item};
 use kernel32;
 use resolution_method::{FollowSymlinks, ResolutionMethod, UpdateSymlinks};
+use std::{io, iter, ptr};
 use std::fs::DirBuilder;
-use std::io;
 use std::path::Path;
-use std::ptr;
 use std::os::windows::ffi::OsStrExt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use winapi::{DWORD, FILETIME, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
@@ -40,7 +39,11 @@ struct FileTimes {
 #[inline]
 /// Converts a path into a Windows wide string for use in FFI calls.
 fn into_wide_string<P: AsRef<Path>>(path: P) -> Vec<WCHAR> {
-    path.as_ref().as_os_str().encode_wide().collect()
+    path.as_ref()
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect()
 }
 
 impl FileHandle {
@@ -179,7 +182,7 @@ impl Touch for TouchOptions<NonRecursive<File>, UpdateSymlinks> {
 
 impl<I: Item, R: ResolutionMethod> Touch for TouchOptions<Recursive<I>, R>
 where
-    TouchOptions<NoCreate, R>: Touch,
+    TouchOptions<NonRecursive<I>, R>: Touch,
 {
     fn touch<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
         let rec_res = if let Some(parent) = path.as_ref().parent() {
@@ -187,6 +190,8 @@ where
         } else {
             Ok(())
         };
-        rec_res.and_then(|_| TouchOptions::<NoCreate, R>::touch::<P>(builder, path))
+        rec_res.and_then(|_| {
+            TouchOptions::<NonRecursive<I>, R>::touch::<P>(builder, path)
+        })
     }
 }
