@@ -7,8 +7,12 @@
 
 //! Platform-specific utilities.
 
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+mod posix;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+pub use self::posix::*;
 #[cfg(windows)]
 pub use self::windows::*;

@@ -25,6 +25,8 @@
 #![forbid(unused_results)]
 #![forbid(variant_size_differences)]
 
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+extern crate libc;
 #[cfg(windows)]
 extern crate kernel32;
 #[cfg(windows)]
