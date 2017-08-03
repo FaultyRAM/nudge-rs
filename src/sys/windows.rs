@@ -9,7 +9,7 @@
 
 #![allow(unsafe_code)]
 
-use Builder;
+use {Builder, CreationTarget};
 use kernel32;
 use std::{io, iter, ptr};
 use std::path::Path;
@@ -17,7 +17,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use winapi::{DWORD, FILETIME, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
              FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, HANDLE,
-             INVALID_HANDLE_VALUE, LPCWSTR, OPEN_ALWAYS, WCHAR};
+             INVALID_HANDLE_VALUE, LPCWSTR, OPEN_ALWAYS, OPEN_EXISTING, WCHAR};
 
 /// A safe wrapper around a Windows file handle.
 struct FileHandle(HANDLE);
@@ -43,14 +43,14 @@ fn into_wide_string<P: AsRef<Path>>(path: P) -> Vec<WCHAR> {
 impl FileHandle {
     #[inline]
     /// Creates a file handle to a path with the given flags.
-    pub fn open(path: LPCWSTR, flags: DWORD) -> io::Result<FileHandle> {
+    pub fn open(path: LPCWSTR, disp: DWORD, flags: DWORD) -> io::Result<FileHandle> {
         let fd = unsafe {
             kernel32::CreateFileW(
                 path,
                 FILE_WRITE_ATTRIBUTES,
                 FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
                 ptr::null_mut(),
-                OPEN_ALWAYS,
+                disp,
                 FILE_FLAG_BACKUP_SEMANTICS | flags,
                 ptr::null_mut(),
             )
@@ -137,20 +137,17 @@ impl Builder {
     #[inline]
     /// Implementation details.
     pub(crate) fn touch_sys<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
-        self.touch_sys_common(path, 0)
-    }
-
-    #[inline]
-    /// Implementation details.
-    pub(crate) fn touch_symlink_sys<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
-        self.touch_sys_common(path, FILE_FLAG_OPEN_REPARSE_POINT)
-    }
-
-    #[inline]
-    /// Implementation details.
-    fn touch_sys_common<P: AsRef<Path>>(&self, path: P, flags: DWORD) -> io::Result<()> {
         let p = into_wide_string(path);
         let times = FileTimes::from_builder(self);
-        FileHandle::open(p.as_ptr(), flags).and_then(|mut fd| fd.update_timestamps(&times))
+        let disp = match self.creation_target {
+            CreationTarget::None => OPEN_EXISTING,
+            CreationTarget::File => OPEN_ALWAYS,
+        };
+        let flags = if self.follow_symlinks {
+            0
+        } else {
+            FILE_FLAG_OPEN_REPARSE_POINT
+        };
+        FileHandle::open(p.as_ptr(), disp, flags).and_then(|mut fd| fd.update_timestamps(&times))
     }
 }
