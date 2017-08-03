@@ -9,17 +9,11 @@
 
 #![allow(unsafe_code)]
 
-use {Builder, Touch, TouchOptions};
-use creation_method::{NoCreate, NonRecursive, Recursive};
-use item::{Directory, File, Item};
+use Builder;
 use libc::{self, c_char, c_int, c_long, time_t, timespec, AT_FDCWD, AT_SYMLINK_NOFOLLOW, O_CREAT,
-           O_DIRECTORY, O_TRUNC, O_WRONLY, S_IRGRP, S_IROTH, S_IRUSR, S_IWGRP, S_IWOTH, S_IWUSR,
-           UTIME_OMIT};
-use resolution_method::{FollowSymlinks, ResolutionMethod, UpdateSymlinks};
+           O_TRUNC, O_WRONLY, S_IRGRP, S_IROTH, S_IRUSR, S_IWGRP, S_IWOTH, S_IWUSR, UTIME_OMIT};
 use std::{io, iter};
-use std::fs::DirBuilder;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -43,34 +37,9 @@ fn into_c_string<P: AsRef<Path>>(path: P) -> Vec<c_char> {
 }
 
 #[inline]
-/// Updates the timestamps for an existing path, after resolving symbolic links.
-fn update_existing_follow<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-    utimensat(builder, path, 0)
-}
-
-#[inline]
-/// Updates the timestamps for an existing path, without resolving symbolic links.
-fn update_existing_update<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-    utimensat(builder, path, AT_SYMLINK_NOFOLLOW)
-}
-
-#[inline]
-/// Updates the timestamps for a directory that does not yet exist.
-fn update_new_dir<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-    FileHandle::open(path, O_DIRECTORY).and_then(|fd| futimens(builder, &fd))
-}
-
-#[inline]
-/// Updates the timestamps for a file that does not yet exist.
-fn update_new_file<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-    FileHandle::open(path, 0).and_then(|fd| futimens(builder, &fd))
-}
-
-#[inline]
 /// Safely wraps the POSIX `futimens` function.
-fn futimens(builder: &Builder, fd: &FileHandle) -> io::Result<()> {
-    let times = FileTimes::from_builder(builder);
-    if unsafe { libc::futimens(fd.0, times.as_ptr()) } == 0 {
+fn futimens(fd: &FileHandle, times: *const timespec) -> io::Result<()> {
+    if unsafe { libc::futimens(fd.0, times) } == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
@@ -79,10 +48,8 @@ fn futimens(builder: &Builder, fd: &FileHandle) -> io::Result<()> {
 
 #[inline]
 /// Safely wraps the POSIX `utimensat` function.
-fn utimensat<P: AsRef<Path>>(builder: &Builder, path: P, flag: c_int) -> io::Result<()> {
-    let p = into_c_string(path);
-    let times = FileTimes::from_builder(builder);
-    if unsafe { libc::utimensat(AT_FDCWD, p.as_ptr(), times.as_ptr(), flag) } == 0 {
+fn utimensat(path: *const c_char, times: *const timespec, flag: c_int) -> io::Result<()> {
+    if unsafe { libc::utimensat(AT_FDCWD, path, times, flag) } == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
@@ -93,16 +60,15 @@ impl FileHandle {
     #[inline]
     #[cfg_attr(feature = "clippy", allow(cast_possible_wrap))]
     /// Opens a path.
-    pub fn open<P: AsRef<Path>>(path: P, oflag: c_int) -> io::Result<Self> {
-        let p = into_c_string(path);
+    pub fn open(path: *const c_char) -> io::Result<Self> {
         let fd = unsafe {
             libc::open(
-                p.as_ptr(),
-                O_WRONLY | O_CREAT | O_TRUNC | oflag,
+                path,
+                O_WRONLY | O_CREAT | O_TRUNC,
                 (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH) as c_int,
             )
         };
-        if fd <= 0 {
+        if fd >= 0 {
             Ok(FileHandle(fd))
         } else {
             Err(io::Error::last_os_error())
@@ -162,55 +128,29 @@ impl FileTimes {
     }
 }
 
-impl Touch for TouchOptions<NoCreate, FollowSymlinks> {
+impl Builder {
     #[inline]
-    fn touch<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-        update_existing_follow(builder, path)
+    /// Implementation details.
+    pub(crate) fn touch_sys<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        self.touch_sys_common(path, 0)
     }
-}
 
-impl Touch for TouchOptions<NoCreate, UpdateSymlinks> {
     #[inline]
-    fn touch<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-        update_existing_update(builder, path)
+    /// Implementation details.
+    pub(crate) fn touch_symlink_sys<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        self.touch_sys_common(path, AT_SYMLINK_NOFOLLOW)
     }
-}
 
-impl<R: ResolutionMethod> Touch for TouchOptions<NonRecursive<Directory>, R>
-where
-    TouchOptions<NoCreate, R>: Touch,
-{
     #[inline]
-    fn touch<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-        TouchOptions::<NoCreate, R>::touch(builder, &path)
-            .or_else(|_| update_new_dir(builder, path))
-    }
-}
-
-impl<R: ResolutionMethod> Touch for TouchOptions<NonRecursive<File>, R>
-where
-    TouchOptions<NoCreate, R>: Touch,
-{
-    #[inline]
-    fn touch<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-        TouchOptions::<NoCreate, R>::touch(builder, &path)
-            .or_else(|_| update_new_file(builder, path))
-    }
-}
-
-impl<I: Item, R: ResolutionMethod> Touch for TouchOptions<Recursive<I>, R>
-where
-    TouchOptions<NonRecursive<I>, R>: Touch,
-{
-    #[inline]
-    fn touch<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-        let rec_res = if let Some(parent) = path.as_ref().parent() {
-            DirBuilder::new().recursive(true).mode(0o666).create(parent)
-        } else {
-            Ok(())
-        };
-        rec_res.and_then(|_| {
-            TouchOptions::<NonRecursive<I>, R>::touch::<P>(builder, path)
-        })
+    /// Implementation details.
+    fn touch_sys_common<P: AsRef<Path>>(&self, path: P, utimensat_flag: c_int) -> io::Result<()> {
+        let p = into_c_string(path);
+        let times = FileTimes::from_builder(self);
+        utimensat(p.as_ptr(), times.as_ptr(), utimensat_flag)
+            .or_else(|e| if e.kind() == io::ErrorKind::NotFound {
+                FileHandle::open(p.as_ptr()).and_then(|fd| futimens(&fd, times.as_ptr()))
+            } else {
+                Err(e)
+            })
     }
 }

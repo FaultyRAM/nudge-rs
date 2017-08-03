@@ -7,27 +7,21 @@
 
 //! Windows-specific utilities.
 
-#![cfg_attr(feature = "clippy", allow(cast_possible_truncation))]
 #![allow(unsafe_code)]
 
-use {Builder, Touch, TouchOptions};
-use creation_method::{NoCreate, NonRecursive, Recursive};
-use item::{Directory, File, Item};
+use Builder;
 use kernel32;
-use resolution_method::{FollowSymlinks, ResolutionMethod, UpdateSymlinks};
 use std::{io, iter, ptr};
-use std::fs::DirBuilder;
 use std::path::Path;
 use std::os::windows::ffi::OsStrExt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use winapi::{DWORD, FILETIME, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
              FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, HANDLE,
-             INVALID_HANDLE_VALUE, OPEN_ALWAYS, OPEN_EXISTING, WCHAR};
+             INVALID_HANDLE_VALUE, LPCWSTR, OPEN_ALWAYS, WCHAR};
 
 /// A safe wrapper around a Windows file handle.
 struct FileHandle(HANDLE);
 
-#[derive(Clone, Copy)]
 /// Holds Windows timestamps for a file.
 struct FileTimes {
     /// The access timestamp.
@@ -49,15 +43,14 @@ fn into_wide_string<P: AsRef<Path>>(path: P) -> Vec<WCHAR> {
 impl FileHandle {
     #[inline]
     /// Creates a file handle to a path with the given flags.
-    pub fn open<P: AsRef<Path>>(path: P, disp: DWORD, flags: DWORD) -> io::Result<FileHandle> {
-        let p = into_wide_string(path);
+    pub fn open(path: LPCWSTR, flags: DWORD) -> io::Result<FileHandle> {
         let fd = unsafe {
             kernel32::CreateFileW(
-                p.as_ptr(),
+                path,
                 FILE_WRITE_ATTRIBUTES,
                 FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
                 ptr::null_mut(),
-                disp,
+                OPEN_ALWAYS,
                 FILE_FLAG_BACKUP_SEMANTICS | flags,
                 ptr::null_mut(),
             )
@@ -71,7 +64,7 @@ impl FileHandle {
 
     #[inline]
     /// Updates the timestamps for a file.
-    pub fn update_timestamps(&mut self, times: FileTimes) -> io::Result<()> {
+    pub fn update_timestamps(&mut self, times: &FileTimes) -> io::Result<()> {
         if unsafe {
             kernel32::SetFileTime(self.0, ptr::null(), times.accessed(), times.modified())
         } == 0
@@ -115,83 +108,49 @@ impl FileTimes {
     }
 
     #[inline]
+    #[cfg_attr(feature = "clippy", allow(cast_possible_truncation))]
     /// Converts a Rust timestamp into a Windows timestamp.
     fn systemtime_into_filetime(time: Option<SystemTime>) -> FILETIME {
         if let Some(t) = time {
             // Windows does not use the Unix epoch! The Windows epoch is January 1, 1601 (UTC).
-            let unix_epoch = Duration::from_secs(11644473600);
+            let unix_epoch = Duration::from_secs(11_644_473_600);
             let duration = match t.duration_since(UNIX_EPOCH) {
                 Ok(d) => d + unix_epoch,
                 Err(e) => unix_epoch - e.duration(),
             };
             // Windows timestamps have a resolution of 100 nanoseconds.
-            let nanos = duration.as_secs() * 10000000 + (duration.subsec_nanos() / 100) as u64;
+            let nanos = duration.as_secs() * 10_000_000 + (duration.subsec_nanos() / 100) as u64;
             FILETIME {
                 dwLowDateTime: nanos as DWORD,
                 dwHighDateTime: (nanos >> 32) as DWORD,
             }
         } else {
             FILETIME {
-                dwLowDateTime: 0xFFFFFFFF,
-                dwHighDateTime: 0xFFFFFFFF,
+                dwLowDateTime: 0xFFFF_FFFF,
+                dwHighDateTime: 0xFFFF_FFFF,
             }
         }
     }
 }
 
-impl Touch for TouchOptions<NoCreate, FollowSymlinks> {
-    fn touch<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-        let times = FileTimes::from_builder(builder);
-        FileHandle::open(path, OPEN_EXISTING, 0).and_then(|mut f| f.update_timestamps(times))
+impl Builder {
+    #[inline]
+    /// Implementation details.
+    pub(crate) fn touch_sys<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        self.touch_sys_common(path, 0)
     }
-}
 
-impl Touch for TouchOptions<NoCreate, UpdateSymlinks> {
-    fn touch<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-        let times = FileTimes::from_builder(builder);
-        FileHandle::open(path, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT)
-            .and_then(|mut f| f.update_timestamps(times))
+    #[inline]
+    /// Implementation details.
+    pub(crate) fn touch_symlink_sys<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        self.touch_sys_common(path, FILE_FLAG_OPEN_REPARSE_POINT)
     }
-}
 
-impl<R: ResolutionMethod> Touch for TouchOptions<NonRecursive<Directory>, R>
-where
-    TouchOptions<NoCreate, R>: Touch,
-{
-    fn touch<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-        let p = into_wide_string(&path);
-        let _ = unsafe { kernel32::CreateDirectoryW(p.as_ptr(), ptr::null_mut()) };
-        TouchOptions::<NoCreate, R>::touch::<P>(builder, path)
-    }
-}
-
-impl Touch for TouchOptions<NonRecursive<File>, FollowSymlinks> {
-    fn touch<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-        let times = FileTimes::from_builder(builder);
-        FileHandle::open(path, OPEN_ALWAYS, 0).and_then(|mut f| f.update_timestamps(times))
-    }
-}
-
-impl Touch for TouchOptions<NonRecursive<File>, UpdateSymlinks> {
-    fn touch<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-        let times = FileTimes::from_builder(builder);
-        FileHandle::open(path, OPEN_ALWAYS, FILE_FLAG_OPEN_REPARSE_POINT)
-            .and_then(|mut f| f.update_timestamps(times))
-    }
-}
-
-impl<I: Item, R: ResolutionMethod> Touch for TouchOptions<Recursive<I>, R>
-where
-    TouchOptions<NonRecursive<I>, R>: Touch,
-{
-    fn touch<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()> {
-        let rec_res = if let Some(parent) = path.as_ref().parent() {
-            DirBuilder::new().recursive(true).create(parent)
-        } else {
-            Ok(())
-        };
-        rec_res.and_then(|_| {
-            TouchOptions::<NonRecursive<I>, R>::touch::<P>(builder, path)
-        })
+    #[inline]
+    /// Implementation details.
+    fn touch_sys_common<P: AsRef<Path>>(&self, path: P, flags: DWORD) -> io::Result<()> {
+        let p = into_wide_string(path);
+        let times = FileTimes::from_builder(self);
+        FileHandle::open(p.as_ptr(), flags).and_then(|mut fd| fd.update_timestamps(&times))
     }
 }
