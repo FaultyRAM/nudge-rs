@@ -9,6 +9,7 @@ rust:
 matrix:
   allow_failures:
     - rust: nightly
+    - os: osx
 script:
   - cargo build -vv
   - cargo doc -vv

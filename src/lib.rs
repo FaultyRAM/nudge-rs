@@ -32,23 +32,9 @@ extern crate kernel32;
 #[cfg(windows)]
 extern crate winapi;
 
-pub mod creation_method;
-pub mod item;
-pub mod resolution_method;
 mod sys;
 
-/// Re-exports of commonly-used functionality.
-pub mod prelude {
-    pub use Builder;
-    pub use creation_method::{CreationMethod, NoCreate, NonRecursive, Recursive};
-    pub use item::{Directory, File, Item};
-    pub use resolution_method::{FollowSymlinks, ResolutionMethod, UpdateSymlinks};
-}
-
-use self::creation_method::CreationMethod;
-use self::resolution_method::ResolutionMethod;
 use std::io;
-use std::marker::PhantomData;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -65,37 +51,39 @@ pub struct Builder {
     modified: Option<SystemTime>,
 }
 
-#[doc(hidden)]
-/// Options for controlling behaviour while updating timestamps.
-pub struct TouchOptions<A: CreationMethod, B: ResolutionMethod>(PhantomData<A>, PhantomData<B>);
-
-#[doc(hidden)]
-/// Provides an overloadable `touch` method for `TouchOptions`.
-pub trait Touch {
-    fn touch<P: AsRef<Path>>(builder: &Builder, path: P) -> io::Result<()>;
-}
-
+#[inline]
 /// Updates the timestamps for a filesystem path to the current system time.
 ///
-/// If the path does not exist, the specified creation method will be used to create the path.
+/// If the path does not exist, this will create an empty file at that path.
 ///
-/// If symbolic links are encountered, the specified resolution method will be used to determine
-/// how to resolve the path or, alternatively, whether to update the symbolic link itself.
+/// If the path refers to a symbolic link, this will follow the symbolic link.
 ///
 /// This wraps the functionality provided by the `Builder` type and is provided for convenience.
 /// For more fine-grained control, use `Builder` directly.
-pub fn touch<A: CreationMethod, B: ResolutionMethod, C: AsRef<Path>>(path: C) -> io::Result<()>
-where
-    TouchOptions<A, B>: Touch,
-{
+pub fn touch<P: AsRef<Path>>(path: P) -> io::Result<()> {
+    let now = SystemTime::now();
+    Builder::new().accessed(now).modified(now).touch(path)
+}
+
+#[inline]
+/// Updates the timestamps for a filesystem path to the current system time.
+///
+/// If the path does not exist, this will create an empty file at that path.
+///
+/// If the path refers to a symbolic link, this will update the symbolic link.
+///
+/// This wraps the functionality provided by the `Builder` type and is provided for convenience.
+/// For more fine-grained control, use `Builder` directly.
+pub fn touch_symlink<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let now = SystemTime::now();
     Builder::new()
         .accessed(now)
         .modified(now)
-        .touch::<A, B, C>(path)
+        .touch_symlink(path)
 }
 
 impl Builder {
+    #[inline]
     /// Creates a new builder with default values.
     pub fn new() -> Self {
         Self {
@@ -104,6 +92,7 @@ impl Builder {
         }
     }
 
+    #[inline]
     /// The access timestamp to use when updating timestamps.
     ///
     /// If this method is not called, the access timestamp will not be updated.
@@ -112,6 +101,7 @@ impl Builder {
         self
     }
 
+    #[inline]
     /// The modification timestamp to use when updating timestamps.
     ///
     /// If this method is not called, the modification timestamp will not be updated.
@@ -120,21 +110,29 @@ impl Builder {
         self
     }
 
+    #[inline]
     /// Updates the timestamps for a filesystem path.
     ///
-    /// If the path does not exist, the specified creation method will be used to create the path.
-    pub fn touch<A: CreationMethod, B: ResolutionMethod, C: AsRef<Path>>(
-        &self,
-        path: C,
-    ) -> io::Result<()>
-    where
-        TouchOptions<A, B>: Touch,
-    {
-        TouchOptions::<A, B>::touch::<C>(self, path)
+    /// If the path does not exist, this will create an empty file at that path.
+    ///
+    /// If the path refers to a symbolic link, this will follow the symbolic link.
+    pub fn touch<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        self.touch_sys(path)
+    }
+
+    #[inline]
+    /// Updates the timestamps for a filesystem path.
+    ///
+    /// If the path does not exist, this will create an empty file at that path.
+    ///
+    /// If the path refers to a symbolic link, this will update the symbolic link.
+    pub fn touch_symlink<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        self.touch_symlink_sys(path)
     }
 }
 
 impl Default for Builder {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
