@@ -9,7 +9,7 @@
 
 #![allow(unsafe_code)]
 
-use Builder;
+use {Builder, CreationTarget};
 use libc::{self, c_char, c_int, c_long, time_t, timespec, AT_FDCWD, AT_SYMLINK_NOFOLLOW, O_CREAT,
            O_TRUNC, O_WRONLY, S_IRGRP, S_IROTH, S_IRUSR, S_IWGRP, S_IWOTH, S_IWUSR, UTIME_OMIT};
 use std::{io, iter};
@@ -132,23 +132,21 @@ impl Builder {
     #[inline]
     /// Implementation details.
     pub(crate) fn touch_sys<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
-        self.touch_sys_common(path, 0)
-    }
-
-    #[inline]
-    /// Implementation details.
-    pub(crate) fn touch_symlink_sys<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
-        self.touch_sys_common(path, AT_SYMLINK_NOFOLLOW)
-    }
-
-    #[inline]
-    /// Implementation details.
-    fn touch_sys_common<P: AsRef<Path>>(&self, path: P, utimensat_flag: c_int) -> io::Result<()> {
         let p = into_c_string(path);
         let times = FileTimes::from_builder(self);
+        let utimensat_flag = if self.follow_symlinks {
+            0
+        } else {
+            AT_SYMLINK_NOFOLLOW
+        };
         utimensat(p.as_ptr(), times.as_ptr(), utimensat_flag)
             .or_else(|e| if e.kind() == io::ErrorKind::NotFound {
-                FileHandle::open(p.as_ptr()).and_then(|fd| futimens(&fd, times.as_ptr()))
+                match self.creation_target {
+                    CreationTarget::None => Err(e),
+                    CreationTarget::File => {
+                        FileHandle::open(p.as_ptr()).and_then(|fd| futimens(&fd, times.as_ptr()))
+                    }
+                }
             } else {
                 Err(e)
             })

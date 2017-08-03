@@ -38,7 +38,7 @@ use std::io;
 use std::path::Path;
 use std::time::SystemTime;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 /// A builder for updating filesystem timestamps.
 pub struct Builder {
     /// The new access timestamp.
@@ -49,37 +49,19 @@ pub struct Builder {
     ///
     /// If this is `None`, the modification timestamp will not be modified.
     modified: Option<SystemTime>,
+    /// Whether to follow symbolic links.
+    follow_symlinks: bool,
+    /// What to create if a path does not exist.
+    creation_target: CreationTarget,
 }
 
-#[inline]
-/// Updates the timestamps for a filesystem path to the current system time.
-///
-/// If the path does not exist, this will create an empty file at that path.
-///
-/// If the path refers to a symbolic link, this will follow the symbolic link.
-///
-/// This wraps the functionality provided by the `Builder` type and is provided for convenience.
-/// For more fine-grained control, use `Builder` directly.
-pub fn touch<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    let now = SystemTime::now();
-    Builder::new().accessed(now).modified(now).touch(path)
-}
-
-#[inline]
-/// Updates the timestamps for a filesystem path to the current system time.
-///
-/// If the path does not exist, this will create an empty file at that path.
-///
-/// If the path refers to a symbolic link, this will update the symbolic link.
-///
-/// This wraps the functionality provided by the `Builder` type and is provided for convenience.
-/// For more fine-grained control, use `Builder` directly.
-pub fn touch_symlink<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    let now = SystemTime::now();
-    Builder::new()
-        .accessed(now)
-        .modified(now)
-        .touch_symlink(path)
+#[derive(Clone, Debug)]
+/// What to create if a path does not exist.
+pub enum CreationTarget {
+    /// Do not create anything.
+    None,
+    /// Create a file.
+    File,
 }
 
 impl Builder {
@@ -89,45 +71,54 @@ impl Builder {
         Self {
             accessed: None,
             modified: None,
+            follow_symlinks: false,
+            creation_target: CreationTarget::None,
         }
     }
 
     #[inline]
-    /// The access timestamp to use when updating timestamps.
+    /// Specifies the access timestamp to use when updating timestamps.
     ///
-    /// If this method is not called, the access timestamp will not be updated.
-    pub fn accessed(&mut self, time: SystemTime) -> &mut Self {
-        self.accessed = Some(time);
+    /// If this is `None` (the default), the access timestamp will not be updated.
+    pub fn accessed(&mut self, time: Option<SystemTime>) -> &mut Self {
+        self.accessed = time;
         self
     }
 
     #[inline]
-    /// The modification timestamp to use when updating timestamps.
+    /// Specifies the modification timestamp to use when updating timestamps.
     ///
-    /// If this method is not called, the modification timestamp will not be updated.
-    pub fn modified(&mut self, time: SystemTime) -> &mut Self {
-        self.modified = Some(time);
+    /// If this is `None` (the default), the modification timestamp will not be updated.
+    pub fn modified(&mut self, time: Option<SystemTime>) -> &mut Self {
+        self.modified = time;
         self
     }
 
     #[inline]
-    /// Updates the timestamps for a filesystem path.
+    /// Specifies whether to follow symbolic links.
     ///
-    /// If the path does not exist, this will create an empty file at that path.
+    /// If this is `false` (the default) and a path refers to a symbolic link, the symbolic link
+    /// will be updated instead of the path it refers to.
+    pub fn follow_symlinks(&mut self, follow: bool) -> &mut Self {
+        self.follow_symlinks = follow;
+        self
+    }
+
+    #[inline]
+    /// Specifies what to create if a path does not exist.
     ///
-    /// If the path refers to a symbolic link, this will follow the symbolic link.
+    /// This is non-recursive, i.e. if any parent directories do not exist, creation will fail.
+    ///
+    /// By default, nothing will be created.
+    pub fn creation_target(&mut self, target: CreationTarget) -> &mut Self {
+        self.creation_target = target;
+        self
+    }
+
+    #[inline]
+    /// Updates the timestamps for a filesystem path, using the options given to a builder.
     pub fn touch<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
         self.touch_sys(path)
-    }
-
-    #[inline]
-    /// Updates the timestamps for a filesystem path.
-    ///
-    /// If the path does not exist, this will create an empty file at that path.
-    ///
-    /// If the path refers to a symbolic link, this will update the symbolic link.
-    pub fn touch_symlink<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
-        self.touch_symlink_sys(path)
     }
 }
 
@@ -135,5 +126,12 @@ impl Default for Builder {
     #[inline]
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Default for CreationTarget {
+    #[inline]
+    fn default() -> Self {
+        CreationTarget::None
     }
 }
