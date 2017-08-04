@@ -33,3 +33,6 @@ version = "0.2"
 
 [target.'cfg(windows)'.dependencies.winapi]
 version = "0.2"
+
+[dev-dependencies.tempdir]
+version = "0.3"

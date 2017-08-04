@@ -31,6 +31,8 @@ extern crate libc;
 extern crate kernel32;
 #[cfg(windows)]
 extern crate winapi;
+#[cfg(test)]
+extern crate tempdir;
 
 mod sys;
 
@@ -72,7 +74,7 @@ impl Builder {
             accessed: None,
             modified: None,
             follow_symlinks: false,
-            creation_target: CreationTarget::None,
+            creation_target: CreationTarget::default(),
         }
     }
 
@@ -133,5 +135,407 @@ impl Default for CreationTarget {
     #[inline]
     fn default() -> Self {
         CreationTarget::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {Builder, CreationTarget};
+    use std::fs::{self, OpenOptions};
+    use std::io;
+    #[cfg(unix)]
+    use std::os::unix;
+    #[cfg(windows)]
+    use std::os::windows;
+    use std::path::{Path, PathBuf};
+    use std::time::SystemTime;
+    use tempdir::TempDir;
+
+    struct TestHelper(TempDir);
+
+    fn file_path<P: AsRef<Path>>(prefix: P) -> PathBuf {
+        prefix.as_ref().join("file.txt")
+    }
+
+    fn directory_path<P: AsRef<Path>>(prefix: P) -> PathBuf {
+        prefix.as_ref().join("directory")
+    }
+
+    fn symlink_file_path<P: AsRef<Path>>(prefix: P) -> PathBuf {
+        prefix.as_ref().join("symlink-file.txt")
+    }
+
+    fn symlink_directory_path<P: AsRef<Path>>(prefix: P) -> PathBuf {
+        prefix.as_ref().join("symlink-directory")
+    }
+
+    fn times<P: AsRef<Path>>(path: P) -> (SystemTime, SystemTime) {
+        let metadata = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) => panic!(
+                "could not obtain metadata for {}: {}",
+                path.as_ref().display(),
+                e
+            ),
+        };
+        (
+            metadata
+                .accessed()
+                .expect("atime not supported on this platform"),
+            metadata
+                .modified()
+                .expect("mtime not supported on this platform"),
+        )
+    }
+
+    fn symlink_times<P: AsRef<Path>>(path: P) -> (SystemTime, SystemTime) {
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) => panic!(
+                "could not obtain metadata for {}: {}",
+                path.as_ref().display(),
+                e
+            ),
+        };
+        (
+            metadata
+                .accessed()
+                .expect("atime not supported on this platform"),
+            metadata
+                .modified()
+                .expect("mtime not supported on this platform"),
+        )
+    }
+
+    fn touch<P: AsRef<Path>>(builder: &Builder, path: P) {
+        if let Err(e) = builder.touch(path) {
+            panic!("`Builder::touch` failed: {}", e);
+        }
+    }
+
+    impl TestHelper {
+        pub fn new() -> TestHelper {
+            match TempDir::new("nudge-rs_test") {
+                Ok(td) => TestHelper(td),
+                Err(e) => panic!("could not create temporary directory: {}", e),
+            }
+        }
+
+        pub fn create_top_level_file(&self) -> PathBuf {
+            let path = file_path(self.0.path());
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => path,
+                Err(e) => panic!("could not create top-level file: {}", e),
+            }
+        }
+
+        pub fn create_top_level_directory(&self) -> PathBuf {
+            let path = directory_path(self.0.path());
+            match fs::create_dir(&path) {
+                Ok(_) => path,
+                Err(e) => panic!("could not create top-level directory: {}", e),
+            }
+        }
+
+        #[cfg(unix)]
+        pub fn create_top_level_symlink_file(&self) -> PathBuf {
+            let src = file_path(self.0.path());
+            let dst = symlink_file_path(self.0.path());
+            match unix::fs::symlink(src, &dst) {
+                Ok(_) => dst,
+                Err(e) => panic!("could not create file symbolic link: {}", e),
+            }
+        }
+
+        #[cfg(unix)]
+        pub fn create_top_level_symlink_directory(&self) -> PathBuf {
+            let src = directory_path(self.0.path());
+            let dst = symlink_directory_path(self.0.path());
+            match unix::fs::symlink(src, &dst) {
+                Ok(_) => dst,
+                Err(e) => panic!("could not create directory symbolic link: {}", e),
+            }
+        }
+
+        #[cfg(windows)]
+        pub fn create_top_level_symlink_file(&self) -> PathBuf {
+            let src = file_path(self.0.path());
+            let dst = symlink_file_path(self.0.path());
+            match windows::fs::symlink_file(src, &dst) {
+                Ok(_) => dst,
+                Err(e) => panic!("could not create file symbolic link: {}", e),
+            }
+        }
+
+        #[cfg(windows)]
+        pub fn create_top_level_symlink_directory(&self) -> PathBuf {
+            let src = directory_path(self.0.path());
+            let dst = symlink_directory_path(self.0.path());
+            match windows::fs::symlink_dir(src, &dst) {
+                Ok(_) => dst,
+                Err(e) => panic!("could not create directory symbolic link: {}", e),
+            }
+        }
+
+        pub fn nonexisting_file_path(&self) -> PathBuf {
+            self.0.path().join("nonexisting-file-path.txt")
+        }
+    }
+
+    #[test]
+    fn existing_file_noupdate() {
+        let helper = TestHelper::new();
+        let file_path = helper.create_top_level_file();
+        let old_times = times(&file_path);
+        let builder = Builder::new();
+        touch(&builder, &file_path);
+        assert_eq!(old_times, times(file_path));
+    }
+
+    #[test]
+    fn existing_file_atime() {
+        let helper = TestHelper::new();
+        let file_path = helper.create_top_level_file();
+        let (_, old_mtime) = times(&file_path);
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder.accessed(Some(now));
+        touch(&builder, &file_path);
+        assert_eq!((now, old_mtime), times(file_path));
+    }
+
+    #[test]
+    fn existing_file_mtime() {
+        let helper = TestHelper::new();
+        let file_path = helper.create_top_level_file();
+        let (old_atime, _) = times(&file_path);
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder.modified(Some(now));
+        touch(&builder, &file_path);
+        assert_eq!((old_atime, now), times(file_path));
+    }
+
+    #[test]
+    fn existing_file_times() {
+        let helper = TestHelper::new();
+        let file_path = helper.create_top_level_file();
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder.accessed(Some(now)).modified(Some(now));
+        touch(&builder, &file_path);
+        assert_eq!((now, now), times(file_path));
+    }
+
+    #[test]
+    fn existing_directory_noupdate() {
+        let helper = TestHelper::new();
+        let dir_path = helper.create_top_level_directory();
+        let old_times = times(&dir_path);
+        let builder = Builder::new();
+        touch(&builder, &dir_path);
+        assert_eq!(old_times, times(dir_path));
+    }
+
+    #[test]
+    fn existing_directory_atime() {
+        let helper = TestHelper::new();
+        let dir_path = helper.create_top_level_directory();
+        let (_, old_mtime) = times(&dir_path);
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder.accessed(Some(now));
+        touch(&builder, &dir_path);
+        assert_eq!((now, old_mtime), times(dir_path));
+    }
+
+    #[test]
+    fn existing_directory_mtime() {
+        let helper = TestHelper::new();
+        let dir_path = helper.create_top_level_directory();
+        let (old_atime, _) = times(&dir_path);
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder.modified(Some(now));
+        touch(&builder, &dir_path);
+        assert_eq!((old_atime, now), times(dir_path));
+    }
+
+    #[test]
+    fn existing_directory_times() {
+        let helper = TestHelper::new();
+        let dir_path = helper.create_top_level_directory();
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder.accessed(Some(now)).modified(Some(now));
+        touch(&builder, &dir_path);
+        assert_eq!((now, now), times(dir_path));
+    }
+
+    #[test]
+    fn follow_symlink() {
+        let helper = TestHelper::new();
+        let file_path = helper.create_top_level_file();
+        let sym_path = helper.create_top_level_symlink_file();
+        let sym_old_times = symlink_times(&sym_path);
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder
+            .accessed(Some(now))
+            .modified(Some(now))
+            .follow_symlinks(true);
+        touch(&builder, &sym_path);
+        assert_eq!((now, now), times(file_path));
+        assert_eq!(sym_old_times, symlink_times(sym_path));
+    }
+
+    #[test]
+    fn symlink_file_noupdate() {
+        let helper = TestHelper::new();
+        let sym_path = helper.create_top_level_symlink_file();
+        let old_times = symlink_times(&sym_path);
+        let builder = Builder::new();
+        touch(&builder, &sym_path);
+        assert_eq!(old_times, symlink_times(sym_path));
+    }
+
+    #[test]
+    fn symlink_file_atime() {
+        let helper = TestHelper::new();
+        let sym_path = helper.create_top_level_symlink_file();
+        let (_, old_mtime) = symlink_times(&sym_path);
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder.accessed(Some(now));
+        touch(&builder, &sym_path);
+        assert_eq!((now, old_mtime), symlink_times(sym_path));
+    }
+
+    #[test]
+    fn symlink_file_mtime() {
+        let helper = TestHelper::new();
+        let sym_path = helper.create_top_level_symlink_file();
+        let (old_atime, _) = symlink_times(&sym_path);
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder.modified(Some(now));
+        touch(&builder, &sym_path);
+        assert_eq!((old_atime, now), symlink_times(sym_path));
+    }
+
+    #[test]
+    fn symlink_file_times() {
+        let helper = TestHelper::new();
+        let sym_path = helper.create_top_level_symlink_file();
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder.accessed(Some(now)).modified(Some(now));
+        touch(&builder, &sym_path);
+        assert_eq!((now, now), symlink_times(sym_path));
+    }
+
+    #[test]
+    fn symlink_directory_noupdate() {
+        let helper = TestHelper::new();
+        let sym_path = helper.create_top_level_symlink_directory();
+        let old_times = symlink_times(&sym_path);
+        let builder = Builder::new();
+        touch(&builder, &sym_path);
+        assert_eq!(old_times, symlink_times(sym_path));
+    }
+
+    #[test]
+    fn symlink_directory_atime() {
+        let helper = TestHelper::new();
+        let sym_path = helper.create_top_level_symlink_directory();
+        let (_, old_mtime) = symlink_times(&sym_path);
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder.accessed(Some(now));
+        touch(&builder, &sym_path);
+        assert_eq!((now, old_mtime), symlink_times(sym_path));
+    }
+
+    #[test]
+    fn symlink_directory_mtime() {
+        let helper = TestHelper::new();
+        let sym_path = helper.create_top_level_symlink_directory();
+        let (old_atime, _) = symlink_times(&sym_path);
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder.modified(Some(now));
+        touch(&builder, &sym_path);
+        assert_eq!((old_atime, now), symlink_times(sym_path));
+    }
+
+    #[test]
+    fn symlink_directory_times() {
+        let helper = TestHelper::new();
+        let sym_path = helper.create_top_level_symlink_directory();
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder.accessed(Some(now)).modified(Some(now));
+        touch(&builder, &sym_path);
+        assert_eq!((now, now), symlink_times(sym_path));
+    }
+
+    #[test]
+    fn nocreate() {
+        let helper = TestHelper::new();
+        match Builder::new().touch(helper.nonexisting_file_path()) {
+            Ok(_) => panic!("`Builder::touch` succeeded"),
+            Err(ref e) if e.kind() == io::ErrorKind::NotFound => (),
+            Err(e) => panic!("`Builder::touch` failed with an unexpected error: {}", e),
+        }
+    }
+
+    #[test]
+    fn new_file_noupdate() {
+        let helper = TestHelper::new();
+        let mut builder = Builder::new();
+        let _ = builder.creation_target(CreationTarget::File);
+        touch(&builder, helper.nonexisting_file_path());
+    }
+
+    #[test]
+    fn new_file_atime() {
+        let helper = TestHelper::new();
+        let file_path = helper.nonexisting_file_path();
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder
+            .accessed(Some(now))
+            .creation_target(CreationTarget::File);
+        touch(&builder, &file_path);
+        let (new_atime, _) = times(file_path);
+        assert_eq!(now, new_atime);
+    }
+
+    #[test]
+    fn new_file_mtime() {
+        let helper = TestHelper::new();
+        let file_path = helper.nonexisting_file_path();
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder
+            .modified(Some(now))
+            .creation_target(CreationTarget::File);
+        touch(&builder, &file_path);
+        let (_, new_mtime) = times(file_path);
+        assert_eq!(now, new_mtime);
+    }
+
+    #[test]
+    fn new_file_times() {
+        let helper = TestHelper::new();
+        let file_path = helper.nonexisting_file_path();
+        let now = SystemTime::now();
+        let mut builder = Builder::new();
+        let _ = builder
+            .accessed(Some(now))
+            .modified(Some(now))
+            .creation_target(CreationTarget::File);
+        touch(&builder, &file_path);
+        assert_eq!((now, now), times(file_path));
     }
 }
