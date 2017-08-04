@@ -12,7 +12,7 @@
 use {Builder, CreationTarget};
 use libc::{self, c_char, c_int, c_long, time_t, timespec, AT_FDCWD, AT_SYMLINK_NOFOLLOW, O_CREAT,
            O_TRUNC, O_WRONLY, S_IRGRP, S_IROTH, S_IRUSR, S_IWGRP, S_IWOTH, S_IWUSR, UTIME_OMIT};
-use std::{io, iter};
+use std::{io, iter, mem};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -46,6 +46,31 @@ fn futimens(fd: &FileHandle, times: *const timespec) -> io::Result<()> {
     }
 }
 
+// Some platforms have a buggy implementation of `utimensat` that succeeds unconditionally
+// if both timestamps are omitted.
+
+#[cfg(target_os = "linux")]
+#[inline]
+/// Safely wraps the POSIX `utimensat` function.
+fn utimensat(path: *const c_char, times: *const timespec, flag: c_int) -> io::Result<()> {
+    unsafe {
+        if times.is_null() ||
+            ((*times).tv_nsec == UTIME_OMIT && (*times.offset(1)).tv_nsec == UTIME_OMIT)
+        {
+            let mut st = mem::uninitialized();
+            if libc::fstatat(AT_FDCWD, path, &mut st, flag) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        if libc::utimensat(AT_FDCWD, path, times, flag) == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
 #[inline]
 /// Safely wraps the POSIX `utimensat` function.
 fn utimensat(path: *const c_char, times: *const timespec, flag: c_int) -> io::Result<()> {
